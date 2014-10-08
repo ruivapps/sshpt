@@ -13,10 +13,7 @@ http://www.gnu.org/licenses/gpl-3.0.txt
 
 *******************************************************************************` 
 
-Detailed information on sshpt as well as the latest version can be found at the
-following URL:
-
-	http://code.google.com/p/sshpt/
+This is the fork of original sshpt ( http://code.google.com/p/sshpt/ )
 
 No installation is necessary to use sshpt but Python 2.5+ is required as well
 as the following Python modules:

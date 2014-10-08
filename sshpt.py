@@ -168,6 +168,8 @@ class SSHThread(GenericThread):
                 host = queueObj['host']
                 username = queueObj['username']
                 password = queueObj['password']
+                key_file = queueObj['key_file']
+                mix_auth = queueObj['mix_auth']
                 timeout = queueObj['timeout']
                 commands = queueObj['commands']
                 local_filepath = queueObj['local_filepath']
@@ -182,6 +184,8 @@ class SSHThread(GenericThread):
                     host,
                     username,
                     password,
+                    key_file,
+                    mix_auth,
                     timeout,
                     commands,
                     local_filepath,
@@ -234,12 +238,14 @@ def stopSSHQueue():
             t.quit()
     return True
 
-def queueSSHConnection(ssh_connect_queue, host, username, password, timeout, commands, local_filepath, remote_filepath, execute, remove, sudo, run_as, port):
+def queueSSHConnection(ssh_connect_queue, host, username, password, key_file, mix_auth, timeout, commands, local_filepath, remote_filepath, execute, remove, sudo, run_as, port):
     """Add files to the SSH Queue (ssh_connect_queue)"""
     queueObj = {}
     queueObj['host'] = host
     queueObj['username'] = username
     queueObj['password'] = password
+    queueObj['key_file'] = key_file
+    queueObj['mix_auth'] = mix_auth
     queueObj['timeout'] = timeout
     queueObj['commands'] = commands
     queueObj['local_filepath'] = local_filepath
@@ -252,14 +258,22 @@ def queueSSHConnection(ssh_connect_queue, host, username, password, timeout, com
     ssh_connect_queue.put(queueObj)
     return True
 
-def paramikoConnect(host, username, password, timeout, port=22):
+def paramikoConnect(host, username, password, key_file, mix_auth, timeout, port=22):
     """Connects to 'host' and returns a Paramiko transport object to use in further communications"""
     # Uncomment this line to turn on Paramiko debugging (good for troubleshooting why some servers report connection failures)
     #paramiko.util.log_to_file('paramiko.log')
     ssh = paramiko.SSHClient()
+    keyfile=os.path.expanduser('~')+'/.ssh/id_rsa'
     try:
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(host, port=port, username=username, password=password, timeout=timeout)
+        if key_file:
+            try:
+                ssh.connect(host, port=port, username=username, password=None, key_filename=keyfile, timeout=timeout)
+            except Exception:
+                if mix_auth:
+                    ssh.connect(host, port=port, username=username, password=password, timeout=timeout)
+        else:
+            ssh.connect(host, port=port, username=username, password=password, timeout=timeout)
     except Exception, detail:
         # Connecting failed (for whatever reason)
         ssh = str(detail)
@@ -333,6 +347,8 @@ def attemptConnection(
         host,
         username,
         password,
+        key_file,
+        mix_auth,
         timeout=30, # Connection timeout
         commands=False, # Either False for no commnads or a list
         local_filepath=False, # Local path of the file to SFTP
@@ -352,7 +368,7 @@ def attemptConnection(
 
     if host != "":
         try:
-            ssh = paramikoConnect(host, username, password, timeout, port=port)
+            ssh = paramikoConnect(host, username, password, key_file, mix_auth, timeout, port=port)
             if type(ssh) == type(""): # If ssh is a string that means the connection failed and 'ssh' is the details as to why
                 connection_result = False
                 command_output = ssh
@@ -398,6 +414,8 @@ def sshpt(
         hostlist, # List - Hosts to connect to
         username,
         password,
+        key_file, # if login by ssh key instead password
+        mix_auth, # mix auth
         max_threads=10, # Maximum number of simultaneous connection attempts
         timeout=30, # Connection timeout
         commands=False, # List - Commands to execute on hosts (if False nothing will be executed)
@@ -431,7 +449,7 @@ def sshpt(
     while len(hostlist) != 0: # Only add items to the ssh_connect_queue if there are available threads to take them.
         for host in hostlist:
             if ssh_connect_queue.qsize() <= max_threads:
-                queueSSHConnection(ssh_connect_queue, host, username, password, timeout, commands, local_filepath, remote_filepath, execute, remove, sudo, run_as, port)
+                queueSSHConnection(ssh_connect_queue, host, username, password, key_file, mix_auth, timeout, commands, local_filepath, remote_filepath, execute, remove, sudo, run_as, port)
                 hostlist.remove(host)
         sleep(1)
     ssh_connect_queue.join() # Wait until all jobs are done before exiting
@@ -460,9 +478,12 @@ def main():
     parser.add_option("-T", "--timeout", dest="timeout", default=30, help="Timeout (in seconds) before giving up on an SSH connection (default: 30)", metavar="<seconds>")
     parser.add_option("-s", "--sudo", action="store_true", dest="sudo", default=False, help="Use sudo to execute the command (default: as root).")
     parser.add_option("-U", "--sudouser", dest="run_as", default="root", help="Run the command (via sudo) as this user.", metavar="<username>")
+    parser.add_option("-k", "--keyfile", dest="key_file", default=None, help="SSH key file for passwordless login. This override --dk option", metavar="<file>")
+    parser.add_option("--dk", dest="default_key", action="store_true", default=False, help="use default ~/id_rsa key for passwordless login")
+    parser.add_option("-m", "--mix-auth", dest="mix_auth", action="store_true", default=False, help="use with ssh key. mix-auth will try to connect using ssh key first then passowrd if key is not working")
     
     (options, args) = parser.parse_args()
-
+    
     # Check to make sure we were passed at least one command line argument
     try:
         sys.argv[1]
@@ -492,7 +513,10 @@ def main():
     run_as = options.run_as
     verbose = options.verbose
     outfile = options.outfile
-
+    key_file = options.key_file
+    default_key = options.default_key
+    mix_auth = options.mix_auth
+    
     outputhandle = None
 
     if options.hostfile == None and not options.stdin:
@@ -530,19 +554,26 @@ def main():
         username, password = credentials.split(":")
         password = password.rstrip('\n') # Get rid of trailing newline
 
-    # Get the username and password to use when checking hosts
-    if username == None:
-        username = raw_input('Username: ')
-    if password == None:
-        password = getpass.getpass('Password: ')
-
+    #use ssh key to login
+    if key_file or default_key:
+        if not key_file:
+            key_file=os.path.expanduser('~')+'/.ssh/id_rsa'
+            
+    #need password for sudo even you have key            
+    if sudo or not key_file or mix_auth:
+        # Get the username and password to use when checking hosts
+        if username == None:
+            username = raw_input('Username: ')
+        if password == None:
+            password = getpass.getpass('Password: ')
+            
     hostlist_list = []
 
     try: # This wierd little sequence of loops allows us to hit control-C in the middle of program execution and get immediate results
         for host in hostlist.split("\n"): # Turn the hostlist into an actual list
             if host != "":
                 hostlist_list.append(host)
-        output_queue = sshpt(hostlist_list, username, password, max_threads, timeout, commands, local_filepath, remote_filepath, execute, remove, sudo, run_as, verbose, outfile, outputhandle, port=port)
+        output_queue = sshpt(hostlist_list, username, password, key_file, mix_auth, max_threads, timeout, commands, local_filepath, remote_filepath, execute, remove, sudo, run_as, verbose, outfile, port=port)
         output_queue.join() # Just to be safe we wait for the OutputThread to finish before moving on
     except KeyboardInterrupt:
         print 'caught KeyboardInterrupt, exiting...'
